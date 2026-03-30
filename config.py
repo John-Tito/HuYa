@@ -34,6 +34,5 @@ URLS = {
 # 延时
 TIMING = {
     "implicit_wait": 2,
-    "page_load_wait": 5,    # 从 2 改成 4
-    "room_enter_wait": 5,   # 从 2 改成 4
+    "page_load_wait": 5     # 从 2 改成 4
 }

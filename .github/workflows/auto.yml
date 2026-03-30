@@ -2,7 +2,7 @@ name: 虎牙虎粮自动发放
 
 on:
   schedule:
-    - cron: '1 16 * * *'  # 北京时间 00:01
+    - cron: '17 23 * * *'
   workflow_dispatch:
     inputs:
       rooms:
@@ -17,7 +17,6 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # 缓存 Python 依赖（超级提速）
       - name: 缓存 Python 依赖
         uses: actions/cache@v4
         with:
@@ -29,17 +28,9 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ==============================================
-      # ✅ 关键：只装虚拟桌面，不装整个 GNOME 桌面！
-      # ==============================================
-      - name: 安装虚拟显示
-        run: sudo apt-get install -y xvfb
-
-      # 安装依赖
       - name: 安装 Python 包
         run: pip install -r requirements.txt
 
-      # 检查 Cookie
       - name: 检查 HUYA_COOKIE
         run: |
           if [ -z "${{ secrets.HUYA_COOKIE }}" ]; then
@@ -47,7 +38,6 @@ jobs:
             exit 1
           fi
 
-      # 获取房间号
       - name: 获取房间号
         id: get-rooms
         run: |
@@ -61,13 +51,22 @@ jobs:
             echo "rooms=${{ secrets.HUYA_ROOMS }}" >> $GITHUB_OUTPUT
           fi
 
-      # ==============================================
-      # ✅ 启动虚拟桌面 + 运行脚本（GitHub 自带 Chrome，不用装！）
-      # ==============================================
       - name: 运行虎粮发放
         env:
           HUYA_COOKIE: ${{ secrets.HUYA_COOKIE }}
           HUYA_ROOMS: ${{ steps.get-rooms.outputs.rooms }}
-          HEADLESS: "true"
         run: |
-          xvfb-run -a python main.py
+          MAX_RETRY=2        # 最多重试 2 次
+          RETRY_DELAY=300    # 每次重试间隔 300 秒 = 5 分钟
+          count=0
+          until python main.py; do
+            count=$((count+1))
+            if [ $count -ge $MAX_RETRY ]; then
+              echo "❌ 已重试 $MAX_RETRY 次，任务失败"
+              exit 1
+            fi
+            echo "⚠️ 执行失败，等待 $RETRY_DELAY 秒后重试（第 $count 次）"
+            sleep $RETRY_DELAY
+          done
+
+          echo "✅ 虎粮发放完成"
