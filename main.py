@@ -8,13 +8,12 @@ import requests
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
-from webdriver_manager.chrome import ChromeDriverManager
+
 import config as cfg
 
 class HuYaAuto:
@@ -52,7 +51,15 @@ class HuYaAuto:
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         chrome_options.page_load_strategy = 'eager'
 
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+        # 可选：设置 CHROME_BINARY 时直接使用指定的 Chrome（离线/固定版本，不触发下载）
+        bin_path = os.getenv('CHROME_BINARY', '').strip()
+        if bin_path:
+            chrome_options.binary_location = bin_path
+
+        # 不传 Service：交给 Selenium Manager 自动获取匹配的 chromedriver；
+        # 本机没装 Chrome 时它会自动下载 Chrome for Testing，
+        # 并缓存到 ~/.cache/selenium（可用 SE_CACHE_PATH 改），下次运行直接复用
+        driver = webdriver.Chrome(options=chrome_options)
         driver.set_page_load_timeout(60)
         return driver
 
@@ -165,16 +172,122 @@ class HuYaAuto:
             if self.debug: print(f"  [DEBUG] 送礼异常: {e}")
             return "❌ 过程异常"
 
+    def _wait_checkin_row(self):
+        """等待并返回粉丝团面板里的打卡任务行，找不到返回 None。
+
+        这里有三个坑：
+        1. 面板容器约 0.2 秒就存在，但任务行要等接口返回后（冷启动可到数秒）才渲染；
+        2. 面板会 re-render，抓住旧引用可能一直查不到，所以每轮都重新查询；
+        3. hover 面板的数据是"进入时拉取"的，频繁 leave/enter 会把请求反复打断，
+           反而永远加载不出来 —— 所以每次 hover 后必须留足加载时间再重试。
+        """
+        sel = cfg.CHECKIN
+        deadline = time.time() + cfg.TIMING["task_wait"]
+        hover_gap = cfg.TIMING["rehover_gap"]
+        last_hover = 0.0
+
+        def find_row():
+            for panel in self.driver.find_elements(By.CSS_SELECTOR, sel["panel"]):
+                for item in panel.find_elements(By.CSS_SELECTOR, sel["task_item"]):
+                    try:
+                        title = item.find_element(By.CSS_SELECTOR, sel["task_title"]).text
+                    except Exception:
+                        continue
+                    if sel["task_name"] in title:
+                        return item
+            return None
+
+        def hover_badge():
+            try:
+                badges = self.driver.find_elements(By.CSS_SELECTOR, sel["badge"])
+                if not badges:
+                    return
+                # 先移到 body 再移上去：指针已停在徽章上时，直接 move_to_element
+                # 不会重新触发 mouseenter，面板会停在空状态
+                body = self.driver.find_element(By.TAG_NAME, "body")
+                ActionChains(self.driver).move_to_element(body).pause(0.1).move_to_element(badges[0]).perform()
+            except Exception:
+                pass
+
+        while time.time() < deadline:
+            row = find_row()
+            if row is not None:
+                return row
+            # 每隔 rehover_gap 秒才重新 hover 一次，中间留给面板把数据加载完
+            if time.time() - last_hover >= hover_gap:
+                hover_badge()
+                last_hover = time.time()
+            time.sleep(0.5)
+        return find_row()
+
     def daily_check_in(self, rid):
+        """粉丝团每日打卡：显式等待徽章 → hover 弹出面板 → 定位打卡任务行 → 按按钮状态判断/点击"""
         try:
             self._safe_get(cfg.URLS["room_base"].format(rid), sleep=6)
-            badge = self.wait.until(EC.presence_of_element_located((By.CLASS_NAME, "FanClubHd--UAIAw8vo8FGSKqVwLp7A")))
-            ActionChains(self.driver).move_to_element(badge).perform()
-            time.sleep(3)
-            btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '打卡')]")))
-            btn.click()
-            return "✅ 打卡成功"
-        except: return "ℹ️ 已打卡"
+
+            # 1) 徽章是懒加载组件，出现时间不稳定；等不到就刷新页面重试一次
+            badge_ok = False
+            for attempt in range(1, cfg.TIMING["badge_retry"] + 1):
+                try:
+                    WebDriverWait(self.driver, cfg.TIMING["badge_wait"]).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, cfg.CHECKIN["badge"])))
+                    badge_ok = True
+                    break
+                except TimeoutException:
+                    if attempt < cfg.TIMING["badge_retry"]:
+                        print(f"  [CHECKIN] 房间 {rid} 第 {attempt} 次未等到粉丝团徽章，刷新页面重试")
+                        try:
+                            self.driver.refresh()
+                        except Exception:
+                            pass
+                        time.sleep(3)
+
+            if not badge_ok:
+                print(f"  [CHECKIN] 房间 {rid} 未找到粉丝团徽章（未加入粉丝团或页面未加载）")
+                return "❌ 打卡失败: 无粉丝团徽章"
+
+            # 2) hover 徽章等面板渲染，定位打卡任务行（它是第 2 个任务，不能用下标）
+            row = self._wait_checkin_row()
+            if row is None:
+                print(f"  [CHECKIN] 房间 {rid} 面板中未找到『{cfg.CHECKIN['task_name']}』")
+                return "❌ 打卡失败: 未找到打卡任务"
+
+            try:
+                btn = row.find_element(By.CSS_SELECTOR, cfg.CHECKIN["task_btn"])
+            except Exception:
+                print(f"  [CHECKIN] 房间 {rid} 打卡任务行没有按钮")
+                return "❌ 打卡失败: 任务无按钮"
+
+            # 3) 已完成时按钮带 disabled 类（文案变为"已完成"），不能再点
+            btn_cls = btn.get_attribute("class") or ""
+            if cfg.CHECKIN["disabled_class"] in btn_cls or "已完成" in btn.text:
+                print(f"  [CHECKIN] 房间 {rid} 今日已打卡")
+                return "ℹ️ 已打卡"
+
+            # 4) 未完成则点击。先 hover 徽章保证面板展开，再用 ActionChains 滑到按钮点击
+            try:
+                ActionChains(self.driver).move_to_element(btn).pause(0.5).click().perform()
+            except Exception:
+                row = self._wait_checkin_row()
+                if row is None:
+                    return "❌ 打卡失败: 面板已收起"
+                btn = row.find_element(By.CSS_SELECTOR, cfg.CHECKIN["task_btn"])
+                self.wait.until(EC.element_to_be_clickable(btn)).click()
+
+            # 5) 点击后按钮应变灰，以此确认真的成功（而不是假定成功）
+            try:
+                WebDriverWait(self.driver, 8).until(
+                    lambda d: cfg.CHECKIN["disabled_class"] in (btn.get_attribute("class") or ""))
+                print(f"  [CHECKIN] 房间 {rid} 打卡成功")
+                return "✅ 打卡成功"
+            except TimeoutException:
+                print(f"  [CHECKIN] 房间 {rid} 已点击打卡，但按钮状态未变化，结果未知")
+                return "⚠️ 打卡结果未知"
+
+        except Exception as e:
+            # 不再吞掉异常假装成功，把真实原因带出来
+            print(f"  [ERROR] 房间 {rid} 打卡异常: {type(e).__name__}: {e}")
+            return "❌ 打卡异常"
 
     def run(self):
         print("=" * 40 + f"\n[HUYA] 虎牙自动任务启动 (Debug: {self.debug})\n" + "=" * 40)
@@ -185,15 +298,21 @@ class HuYaAuto:
             total = self.get_hl_count()
             self.msg_logs.append(f"今日虎粮总数: {total}")
 
+            # 打卡与虎粮数量无关：即使没有虎粮（或数量识别失败），也要进房间打卡
             if total <= 0:
-                print("[DONE] 暂无虎粮，结束运行")
-                return
+                print("[INFO] 暂无虎粮，跳过送礼，仅执行打卡")
+            else:
+                print(f"[INFO] 共 {len(self.rooms)} 个房间，每个房间先送礼再打卡")
 
             for i, rid in enumerate(self.rooms):
-                num = (total // len(self.rooms) + (1 if i < (total % len(self.rooms)) else 0))
-                print(f"\n>>> 房间: {rid} (目标数量: {num})")
+                if total > 0:
+                    num = (total // len(self.rooms) + (1 if i < (total % len(self.rooms)) else 0))
+                    print(f"\n>>> 房间: {rid} (目标数量: {num})")
+                    g_res = self.send_to_room_in_situ(rid, num)
+                else:
+                    print(f"\n>>> 房间: {rid} (无虎粮，仅打卡)")
+                    g_res = "无粮跳过"
 
-                g_res = self.send_to_room_in_situ(rid, num)
                 c_res = self.daily_check_in(rid)
 
                 msg = f"{g_res}； {c_res}"
