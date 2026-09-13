@@ -55,6 +55,8 @@ jobs:
         env:
           HUYA_COOKIE: ${{ secrets.HUYA_COOKIE }}
           HUYA_ROOMS: ${{ steps.get-rooms.outputs.rooms }}
+          SEND_KEY: ${{ secrets.SEND_KEY }}  # <--- 补上这一行，脚本才能读到推送 Key
+          HEADLESS: "true"
         run: |
           MAX_RETRY=2        # 最多重试 2 次
           RETRY_DELAY=300    # 每次重试间隔 300 秒 = 5 分钟

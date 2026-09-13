@@ -1,5 +1,5 @@
-# 虎牙虎粮自动发放
-轻量、开箱即用的 **虎牙虎粮自动批量赠送工具**，支持 GitHub Actions
+# 虎牙虎粮自动发放、直播间打卡
+轻量、开箱即用的 **虎牙虎粮自动批量赠送、直播间打卡工具**，支持 GitHub Actions，并通过 [Server 酱](https://sct.ftqq.com/)推送赠送虎粮、打卡结果至微信。
 
 ---
 
@@ -9,6 +9,7 @@
 - 📦 **无冗余依赖**：仅需 Selenium 环境，超轻量
 - 🎯 **精准分配**：自动读取背包虎粮，批量分配到多个房间
 - 🚀 **云原生**：直接在 GitHub Actions 运行，无需服务器
+- 📲 **Server 酱**： 实时推送赠送虎粮、打卡结果至微信
 
 ---
 
@@ -29,15 +30,21 @@ config.py                   # 页面选择器（唯一配置文件）
 3. 找到 "index.php?m=Msg&do=getMsgC" 项
 4. 在标头中找到并复制整个 Cookie 字符串
 
-### 2. GitHub 部署
+
+### 2. 获取 SendKey（Server 酱）
+1. 打开 [Server 酱官网](https://sct.ftqq.com/)
+2. 注册并登录后，进入「发送通道」页面
+3. 创建通知通道并获取 `SendKey`
+
+### 3. GitHub 部署
 1. Fork 本仓库
 2. 进入仓库 **Settings → Secrets and variables → Actions**
-3. 添加 **2 个必需密钥**（缺少任意一个将直接停止运行）：
-   - `HUYA_COOKIE`：你的虎牙登录 Cookie
-   - `HUYA_ROOMS`：房间号列表，英文逗号分隔（例：`518512,1964,294636272`）
-
+3. 添加 **2 个必需密钥**、**1个非必需密钥**（缺少任意一个将直接停止运行）：
+   - `HUYA_COOKIE`：你的虎牙登录 Cookie；--必须
+   - `HUYA_ROOMS`：房间号列表，英文逗号分隔（例：`518512,1964,294636272`）；--必须
+   - `SEND_KEY`：步骤2中获取的`SendKey`,用于推送送礼物和打卡结果；--非必须
 4. 进入 **Actions** → 启用工作流
-5. 完成！每天 **北京时间 0:01** 自动运行
+5. 完成！每天 **北京时间 0:30** 自动运行
 
 ---
 
@@ -56,6 +63,7 @@ pip install -r requirements.txt
 # 设置环境变量
 export HUYA_COOKIE="你的Cookie"
 export HUYA_ROOMS="518512,1964"
+export SEND_KEY="你的sendkey"
 
 # 启动
 python main.py
@@ -68,6 +76,7 @@ python main.py
 |------|------|
 | HUYA_COOKIE | 登录凭证（必须） |
 | HUYA_ROOMS | 目标房间号列表（必须） |
+| SEND_KEY | Server 酱sendkey（非必须）|
 
 ---
 
@@ -88,7 +97,14 @@ on:
 2. 打开背包页面，读取虎粮数量
 3. 自动分配数量到所有房间
 4. 依次进入房间 → 悬停虎粮 → 自定义数量 → 赠送
-5. 输出执行结果
+5. 房间打卡
+6. 输出执行结果
+7. 推送执行结果到微信：🚀 房间 XXX 送出虎粮 X 个； 打卡结果（✅ 打卡成功 or ℹ️ 已打卡）
+
+---
+
+## ✉️ 推送结果
+<img width="1439" height="697" alt="image" src="https://github.com/user-attachments/assets/6ab4b08b-6553-4b49-9998-386fbf7c94ad" />
 
 ---
 
