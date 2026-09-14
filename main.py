@@ -112,7 +112,7 @@ class HuYaAuto:
 
     def get_hl_count(self):
         print("[SEARCH] 正在查询虎粮数量...")
-        self._safe_get(cfg.URLS["pay_index"], sleep=4)
+        self._safe_get(cfg.URLS["gift_tab"], sleep=4)
         try:
             pack_tab = self.wait.until(EC.element_to_be_clickable((By.ID, cfg.PAY_PAGE["pack_tab"])))
             pack_tab.click()

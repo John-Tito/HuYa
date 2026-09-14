@@ -40,8 +40,7 @@ CHECKIN = {
 URLS = {
     "user_index": "https://i.huya.com/",
     "room_base": "https://huya.com/{}",
-    "pay_index": "https://hd.huya.com/pay/index.html?source=web",
-    "gift_tab": "https://hd.huya.com/web/webPackageV2/index.html?lp={lp}&gid={gid}"
+    "gift_tab": "https://hd.huya.com/web/payNew/index.html?source=web&package=1&lp={lp}&hasVideo=0&gid={gid}&panelType=wrap"
 }
 
 # 延时
