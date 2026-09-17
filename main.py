@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import re
 import sys
 import time
 import requests
@@ -110,27 +111,116 @@ class HuYaAuto:
             print(f"[ERROR] 登录失败: {e}")
             return False
 
-    def get_hl_count(self):
-        print("[SEARCH] 正在查询虎粮数量...")
-        self._safe_get(cfg.URLS["pay_index"], sleep=4)
+    def _open_pack_panel(self, lp, gid):
+        """打开 payNew 的『包裹』面板，并切进内嵌的 webPackageV2 iframe。
+
+        返回 True 时 driver 的上下文已经在该 iframe 内，调用方用完必须
+        switch_to.default_content()。
+
+        为什么要切 frame：payNew 只是外壳，包裹列表/礼物项都在 #wrapshow 的
+        iframe 里，顶层 document 里既没有 .m-gift-item 也没有数量元素。
+        """
+        self._safe_get(cfg.URLS["gift_tab"].format(lp=lp, gid=gid),
+                       sleep=cfg.TIMING["pack_load_wait"])
         try:
             pack_tab = self.wait.until(EC.element_to_be_clickable((By.ID, cfg.PAY_PAGE["pack_tab"])))
-            pack_tab.click()
-            time.sleep(2)
-            n = self.driver.execute_script('''
-                const items = document.querySelectorAll('li[data-num]');
-                for (let item of items) {
-                    let title = item.title || item.innerText || '';
-                    if (title.includes('虎粮')) return item.getAttribute('data-num');
+            try:
+                pack_tab.click()
+            except Exception:
+                # 外壳页偶尔会挂一层 #popupMask 遮罩，原生点击会被拦截；JS 点击不受影响
+                self.driver.execute_script("arguments[0].click();", pack_tab)
+        except Exception as e:
+            print(f"  [PACK] 点击『包裹』标签失败: {type(e).__name__}: {e}")
+            return False
+        try:
+            WebDriverWait(self.driver, cfg.TIMING["frame_wait"]).until(
+                EC.frame_to_be_available_and_switch_to_it(
+                    (By.CSS_SELECTOR, cfg.PAY_PAGE["pack_frame"])))
+            return True
+        except TimeoutException:
+            print("  [PACK] 未等到 webPackageV2 包裹 iframe")
+            return False
+
+    def _leave_frame(self):
+        """切回顶层文档；失败也不该影响主流程。"""
+        try:
+            self.driver.switch_to.default_content()
+        except Exception:
+            pass
+
+    def _wait_pack_data(self):
+        """在包裹 iframe 内等列表渲染完（有物品，或明确显示空态）。"""
+        deadline = time.time() + cfg.TIMING["pack_data_wait"]
+        while time.time() < deadline:
+            try:
+                state = self.driver.execute_script(
+                    "return {items: document.querySelectorAll(arguments[0]).length,"
+                    "        empty: !!document.querySelector(arguments[1])};",
+                    cfg.PAY_PAGE["pack_item"], cfg.PAY_PAGE["pack_empty"])
+            except Exception:
+                state = {}
+            if state.get("items") or state.get("empty"):
+                return True
+            time.sleep(0.5)
+        print("  [PACK] 包裹列表加载超时，按当前 DOM 解析")
+        return False
+
+    def get_hl_count(self):
+        print("[SEARCH] 正在查询虎粮数量...")
+        # 查自己背包时 lp/gid 传 0 即可：列表归属走 cookie 里的 udb_uid
+        if not self._open_pack_panel(lp=0, gid=0):
+            print("[ERROR] 虎粮数量识别失败: 未能进入包裹面板")
+            return 0
+        try:
+            self._wait_pack_data()
+            # 新版包裹项结构：div.m-gift-item > [i.c-count(数量), img, p(物品名)]
+            n = self.driver.execute_script(
+                """
+                const items = document.querySelectorAll(arguments[0]);
+                for (const item of items) {
+                    const nameEl = item.querySelector(arguments[2]);
+                    const name = (nameEl ? nameEl.textContent : '') || item.title || '';
+                    if (!name.includes('虎粮')) continue;
+                    const countEl = item.querySelector(arguments[1]);
+                    const m = (countEl ? countEl.textContent : '').match(/\\d+/);
+                    return m ? m[0] : 0;
                 }
                 return 0;
-            ''')
+                """,
+                cfg.PAY_PAGE["pack_item"], cfg.PAY_PAGE["pack_count"], cfg.PAY_PAGE["pack_name"])
             count = int(n) if n else 0
             print(f"[COUNT] 识别到虎粮: {count}")
             return count
-        except:
-            print("[ERROR] 虎粮数量识别失败")
+        except Exception as e:
+            print(f"[ERROR] 虎粮数量识别失败: {type(e).__name__}: {e}")
             return 0
+        finally:
+            self._leave_frame()
+
+    def _hover_gift_item(self, item):
+        """让 iframe 里的礼物项进入 hover 态（『赠送』面板靠 onMouseEnter 才渲染）。
+
+        优先用真鼠标移动；父页面偶尔会挂遮罩（#popupMask）盖在 iframe 上方，
+        真实鼠标事件会被遮罩吃掉，此时退回 JS 派发 mouseover —— React 的
+        onMouseEnter 本来就是从 mouseover 合成的，效果一样。
+        """
+        try:
+            body = self.driver.find_element(By.TAG_NAME, "body")
+            ActionChains(self.driver).move_to_element(body).pause(0.2).move_to_element(item).perform()
+            WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, cfg.GIFT["panel_css"])))
+            return True
+        except Exception:
+            pass
+        try:
+            self.driver.execute_script(
+                "arguments[0].dispatchEvent(new MouseEvent('mouseover',"
+                "{bubbles: true, cancelable: true, view: window}));", item)
+            WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, cfg.GIFT["panel_css"])))
+            return True
+        except Exception:
+            return False
 
     def send_to_room_in_situ(self, rid, count):
         if count <= 0: return "无粮跳过"
@@ -140,37 +230,77 @@ class HuYaAuto:
             gid = self.driver.execute_script('return document.body.getAttribute("data-gid")')
             if not lp or not gid: return "❌ 获取参数失败"
 
-            self._safe_get(cfg.URLS["gift_tab"].format(lp=lp, gid=gid), sleep=4)
+            # 包裹面板在 iframe 里，后面的元素查找都在该 frame 内进行
+            if not self._open_pack_panel(lp=lp, gid=gid):
+                return "❌ 未进入包裹面板"
 
             items = self.wait.until(EC.presence_of_all_elements_located((By.CLASS_NAME, cfg.GIFT["item_class"])))
             hu_liang = next((i for i in items if "虎粮" in i.text), None)
             if not hu_liang: return "❌ 未找到虎粮"
 
-            ActionChains(self.driver).move_to_element(hu_liang).pause(1).click().perform()
+            # 只要 hover，不要 click：点礼物本身会触发一次"送 1 个"的确认弹窗
+            if not self._hover_gift_item(hu_liang):
+                return "❌ 赠送面板未出现"
+
+            # 数量框是 React 受控 input，两个坑：
+            # 1. 必须先 click 一下：onClick 会把选中项切成"自定义"，发送数量取的是
+            #    「预设值 || 自定义值」，预设值初始为 1 —— 不点它就会永远只送 1 个；
+            # 2. 它是受控组件，只能走原生 value setter + input 事件才能改写 state。
+            # 全程 JS 操作，指针停在礼物上，"赠送"面板才不会被 mouseleave 收掉。
+            filled = self.driver.execute_script(
+                """
+                const inp = document.querySelector(arguments[0]);
+                if (!inp) return false;
+                inp.click();                       // 选中"自定义"，否则按预设的 1 个送
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value').set;
+                setter.call(inp, arguments[1]);
+                inp.dispatchEvent(new Event('input', {bubbles: true}));
+                return true;
+                """, cfg.GIFT["input_css"], str(count))
+            if not filled: return "❌ 未找到数量输入框"
             time.sleep(1)
 
-            inp = self.wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, cfg.GIFT["input_css"])))
-            inp.click()
-            inp.clear()
-            inp.send_keys(str(count))
-            time.sleep(1)
-
-            send_btn = self.wait.until(EC.element_to_be_clickable((By.CLASS_NAME, cfg.GIFT["send_class"])))
-            send_btn.click()
+            clicked = self.driver.execute_script(
+                "const b = document.querySelector(arguments[0]);"
+                "if (!b) return false; b.click(); return true;", cfg.GIFT["send_css"])
+            if not clicked: return "❌ 未找到赠送按钮"
             time.sleep(cfg.TIMING["implicit_wait"])
 
+            # 确认框里写着实际数量（"确定要送 N 个"）：对不上就取消，宁可不送也不能送错
             try:
-                confirm = self.wait.until(EC.element_to_be_clickable((By.CLASS_NAME, cfg.GIFT["confirm_class"])))
-                confirm.click()
-            except:
-                pass
+                # 用 JS 点击：父页面的遮罩可能盖在 iframe 上方
+                confirm = WebDriverWait(self.driver, 8).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, cfg.GIFT["confirm_class"])))
+            except TimeoutException:
+                print(f"  [WARN] 房间 {rid} 未出现确认框（可能已直接送出）")
+                confirm = None
+
+            if confirm is not None:
+                try:
+                    text = self.driver.find_element(By.CSS_SELECTOR, cfg.GIFT["dialog_css"]).text
+                except Exception:
+                    text = ""
+                matched = re.search(r"送\s*(\d+)\s*个", text)
+                shown = matched.group(1) if matched else "?"
+                if not matched or int(shown) != count:
+                    try:
+                        cancel = self.driver.find_element(By.CLASS_NAME, cfg.GIFT["cancel_class"])
+                        self.driver.execute_script("arguments[0].click();", cancel)
+                    except Exception:
+                        pass
+                    print(f"  [ERROR] 房间 {rid} 确认框数量不符: 显示 {shown}，期望 {count}")
+                    return f"❌ 数量不符（弹窗 {shown} ≠ 目标 {count}），已取消"
+                self.driver.execute_script("arguments[0].click();", confirm)
 
             print(f"  [WAIT] 正在结算房间 {rid}，原地等待 12 秒...")
             time.sleep(12)
             return f"🚀 房间 {rid} 送出虎粮 {count} 个"
         except Exception as e:
-            if self.debug: print(f"  [DEBUG] 送礼异常: {e}")
+            print(f"  [ERROR] 房间 {rid} 送礼异常: {type(e).__name__}: {e}")
             return "❌ 过程异常"
+        finally:
+            self._leave_frame()
 
     def _wait_checkin_row(self):
         """等待并返回粉丝团面板里的打卡任务行，找不到返回 None。
