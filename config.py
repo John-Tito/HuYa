@@ -55,7 +55,7 @@ CHECKIN = {
 
 # URL
 URLS = {
-    "user_index": "https://i.huya.com/",
+    "user_index": "https://i.huya.com/index.php?m=Msg&do=getMsgC",
     "room_base": "https://huya.com/{}",
     # 必须带 source=web：payNew 会把它透传成 iframe 的 fromType，而 iframe 里
     # roomInfo.isIcenter = (fromType == "icenter")，一旦是 icenter，点击礼物就是空操作。
@@ -69,7 +69,7 @@ URLS = {
 TIMING = {
     "implicit_wait": 3,
     "page_load_wait": 6,     # 登录刷新后留足加载时间
-    "room_enter_wait": 8,    # 直播间页面极大，给它 8 秒去加载基础 DOM
+    "room_enter_wait": 30,    # 直播间页面极大，给它 8 秒去加载基础 DOM
     "pack_load_wait": 6,     # payNew 外壳页的加载时间
     "frame_wait": 20,        # 等内嵌的 webPackageV2 iframe 出现并切入
     "pack_data_wait": 25,    # 包裹列表接口渲染上限

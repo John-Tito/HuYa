@@ -16,23 +16,35 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 import config as cfg
+from huya_cookie import (drop_cookie_cache, load_cookie, refresh_cookie, save_cookie_cache)
 
 class HuYaAuto:
     def __init__(self):
-        # ============ 配置项 ============
         self.debug = False  # 开启调试
         self.enable_push = True  # 推送开关已开启
-        # ================================
-
         self.msg_logs = []
-        self.cookie = os.getenv('HUYA_COOKIE', '').strip()
+
+        self.cookie_env, self.cookie_cache, self.cookie_path = load_cookie()
         self.rooms = self._parse_rooms(os.getenv('HUYA_ROOMS', ''))
         self.send_key = os.getenv('SEND_KEY', '').strip()
 
-        if not self.cookie:
-            print("[ERROR] 未设置 HUYA_COOKIE"); sys.exit(1)
+        if self.cookie_cache:
+            self.cookie = self.cookie_cache
+            self.cookie_source = "file"
+            print(f"[INFO] 使用缓存 Cookie: {self.cookie_path}")
+        elif self.cookie_env:
+            self.cookie = self.cookie_env
+            self.cookie_source = "env"
+            print(f"[INFO] 使用环境变量 Cookie")
+        else:
+            self.cookie = ""
+            self.cookie_source= ""
+            print("[ERROR] 没有可用的 Cookie")
+            sys.exit(1)
+
         if not self.rooms:
-            self.rooms = [518512, 518511]
+            print("[ERROR] 未设置 HUYA_ROOMS")
+            sys.exit(1)
 
         self.driver = self._init_browser()
         self.wait = WebDriverWait(self.driver, 15)
@@ -64,15 +76,57 @@ class HuYaAuto:
         driver.set_page_load_timeout(60)
         return driver
 
-    def _safe_get(self, url, sleep=3):
-        """导航到 url，页面加载超时时忽略异常（内容通常已就绪）"""
+    def _safe_get(self, url, wait_selector=None, timeout=90, sleep=1.5):
+        """
+        导航到 url，稳健处理页面加载超时。
+
+        :param url: 目标地址
+        :param wait_selector: 可选，(By.XXX, "value") 元组；出现该元素即认为页面就绪
+        :param timeout: driver.get 的页面加载超时（秒）
+        :param sleep: 兜底短暂等待，避免立刻去抓还没渲染的元素
+        """
+        # 每次导航前把页面加载超时调大，避免默认 60 秒太紧
+        try:
+            self.driver.set_page_load_timeout(timeout)
+        except Exception:
+            pass
+
         try:
             self.driver.get(url)
         except TimeoutException:
-            print("[WARN] 页面加载超时，尝试继续解析...")
+            print("[WARN] 页面加载超时，尝试停止加载...")
+            self._stop_loading()
         except Exception as e:
             print(f"[WARN] 导航异常: {e}")
+            self._stop_loading()
+
+        # 等 document.readyState 到 interactive/complete，最多 15 秒
+        try:
+            WebDriverWait(self.driver, 15).until(
+                lambda d: d.execute_script("return document.readyState")
+                in ("interactive", "complete")
+            )
+        except Exception:
+            print("[WARN] readyState 未就绪，继续尝试...")
+
+        # 如果调用方给了关键元素，再等它出现
+        if wait_selector is not None:
+            try:
+                WebDriverWait(self.driver, 20).until(
+                    lambda d: d.find_element(*wait_selector)
+                )
+            except Exception:
+                print(f"[WARN] 未等到元素 {wait_selector}，继续尝试...")
+
         time.sleep(sleep)
+
+
+    def _stop_loading(self):
+        """让浏览器停止继续加载，释放卡住的渲染进程"""
+        try:
+            self.driver.execute_script("window.stop();")
+        except Exception as e:
+            print(f"[WARN] window.stop() 失败: {e}")
 
     def send_notification(self):
         """新增：Server酱推送方法"""
@@ -95,20 +149,79 @@ class HuYaAuto:
         except Exception as e:
             print(f"[ERROR] 推送异常: {e}")
 
+    def _save_cookie_cache(self, cookie, changed):
+        """缓存持久化"""
+        if changed and self.cookie_path:
+            try:
+                save_cookie_cache(self.cookie_path, cookie)
+                print(f"[COOKIE] 登录态已写入缓存文件: {self.cookie_path}")
+            except Exception as e:
+                print(f"[WARN] 写缓存文件失败（不影响本次运行）: {type(e).__name__}: {e}")
+
+    def _drop_cookie_cache(self):
+        """缓存失效丢弃"""
+        if self.cookie_path and drop_cookie_cache(self.cookie_path):
+            print(f"[COOKIE] 已删除失效的缓存文件: {self.cookie_path}")
+
+    def _refresh_cookie(self):
+        """缓存续期更新"""
+
+        # 无条件续期一次, 成功直接返回
+        cookie, info = refresh_cookie(self.cookie)
+        if info:
+            return cookie
+
+        # 如果 cookie 来源为文件, 则当前缓存过期, 丢弃现有缓存, 尝试使用环境变量中的 cookie, 再次刷新Cookie
+        if self.cookie_source == "file":
+            self._drop_cookie_cache()
+            tmp_cookie = self.cookie_env
+            tmp_cookie_source = "env"
+        else:
+            tmp_cookie = self.cookie_cache
+            tmp_cookie_source = "file"
+
+        if tmp_cookie:
+            print(f"[COOKIE] 改用 {tmp_cookie_source} Cookie 重试续期")
+            tmp_cookie, info = refresh_cookie(tmp_cookie)
+
+            if info:
+                self.cookie_env = tmp_cookie
+                self.cookie_cache = tmp_cookie
+                self.cookie = tmp_cookie
+                self.cookie_source = "file"
+
+        return self.cookie
+
     def login(self):
         print("[LOGIN] 正在登录...")
+        old_cookie = self.cookie
+        self.cookie = self._refresh_cookie()
+        self._save_cookie_cache(self.cookie, changed=self.cookie != old_cookie)
+
         try:
-            self._safe_get(cfg.URLS["user_index"], sleep=2)
+            self._safe_get(cfg.URLS["user_index"], sleep=1)
+
             for line in self.cookie.split(';'):
-                if '=' not in line: continue
+                if '=' not in line:
+                    continue
                 name, val = line.split('=', 1)
-                self.driver.add_cookie({'name': name.strip(), 'value': val.strip(), 'domain': '.huya.com', 'path': '/'})
+                self.driver.add_cookie({
+                    'name': name.strip(),
+                    'value': val.strip(),
+                    'domain': '.huya.com',
+                    'path': '/',
+                })
             self.driver.refresh()
-            self.wait.until(EC.presence_of_element_located((By.ID, cfg.LOGIN["huya_num"])))
-            print("[SUCCESS] 登录成功")
-            return True
+            body = self.driver.find_element(By.TAG_NAME, "body").text
+            if '"status":true' in body.replace(" ", ""):
+                print("[SUCCESS] 登录成功")
+                return True
+
+            print(f"[ERROR] 登录失败: {body[:200]}")
+            return False
+
         except Exception as e:
-            print(f"[ERROR] 登录失败: {e}")
+            print(f"[ERROR] 登录失败: {type(e).__name__}: {e}")
             return False
 
     def _open_pack_panel(self, lp, gid):
@@ -120,8 +233,7 @@ class HuYaAuto:
         为什么要切 frame：payNew 只是外壳，包裹列表/礼物项都在 #wrapshow 的
         iframe 里，顶层 document 里既没有 .m-gift-item 也没有数量元素。
         """
-        self._safe_get(cfg.URLS["gift_tab"].format(lp=lp, gid=gid),
-                       sleep=cfg.TIMING["pack_load_wait"])
+        self._safe_get(cfg.URLS["gift_tab"].format(lp=lp, gid=gid), sleep=cfg.TIMING["pack_load_wait"])
         try:
             pack_tab = self.wait.until(EC.element_to_be_clickable((By.ID, cfg.PAY_PAGE["pack_tab"])))
             try:

@@ -6,3 +6,5 @@ cookie
 .chrome
 .venv
 .home
+.huya_cookie/
+.vscode

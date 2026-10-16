@@ -6,13 +6,20 @@ on:
   workflow_dispatch:
     inputs:
       rooms:
-        description: '房间号，逗号分隔'
+        description: '房间号, 逗号分隔'
         required: false
         default: ''
 
 jobs:
   send-hl:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: huya-huliang
+      cancel-in-progress: false
+    timeout-minutes: 30
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -31,44 +38,73 @@ jobs:
       - name: 安装 Python 包
         run: pip install -r requirements.txt
 
-      - name: 检查 HUYA_COOKIE
+      - name: 恢复登录态缓存(仅自动运行)
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: .huya_cookie
+          key: huya-cookie-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            huya-cookie-
+
+      - name: 检查登录凭证
+        env:
+          HUYA_COOKIE: ${{ secrets.HUYA_COOKIE }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ -z "${{ secrets.HUYA_COOKIE }}" ]; then
-            echo "❌ 未配置 HUYA_COOKIE"
-            exit 1
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -z "$HUYA_COOKIE" ]; then
+              echo "❌ 手动运行必须配置 HUYA_COOKIE"
+              exit 1
+            fi
+          else
+            if [ -z "$HUYA_COOKIE" ] && [ ! -s .huya_cookie/cookie.txt ]; then
+              echo "❌ 自动运行:未配置 HUYA_COOKIE, 且缓存中没有可用登录态"
+              exit 1
+            fi
           fi
 
       - name: 获取房间号
         id: get-rooms
+        env:
+          INPUT_ROOMS: ${{ github.event.inputs.rooms }}
+          SECRET_ROOMS: ${{ secrets.HUYA_ROOMS }}
         run: |
-          if [ -n "${{ github.event.inputs.rooms }}" ]; then
-            echo "rooms=${{ github.event.inputs.rooms }}" >> $GITHUB_OUTPUT
-          else
-            if [ -z "${{ secrets.HUYA_ROOMS }}" ]; then
-              echo "❌ 未配置 HUYA_ROOMS"
-              exit 1
-            fi
-            echo "rooms=${{ secrets.HUYA_ROOMS }}" >> $GITHUB_OUTPUT
+          ROOMS="$INPUT_ROOMS"
+          if [ -z "$ROOMS" ]; then
+            ROOMS="$SECRET_ROOMS"
           fi
+          if [ -z "$ROOMS" ]; then
+            echo "❌ 未配置 HUYA_ROOMS"
+            exit 1
+          fi
+          {
+            echo 'rooms<<EOF'
+            echo "$ROOMS"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: 运行虎粮发放
         env:
           HUYA_COOKIE: ${{ secrets.HUYA_COOKIE }}
           HUYA_ROOMS: ${{ steps.get-rooms.outputs.rooms }}
-          SEND_KEY: ${{ secrets.SEND_KEY }}  # <--- 补上这一行，脚本才能读到推送 Key
+          SEND_KEY: ${{ secrets.SEND_KEY }}
           HEADLESS: "true"
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          MAX_RETRY=2        # 最多重试 2 次
-          RETRY_DELAY=300    # 每次重试间隔 300 秒 = 5 分钟
-          count=0
-          until python main.py; do
-            count=$((count+1))
-            if [ $count -ge $MAX_RETRY ]; then
-              echo "❌ 已重试 $MAX_RETRY 次，任务失败"
-              exit 1
-            fi
-            echo "⚠️ 执行失败，等待 $RETRY_DELAY 秒后重试（第 $count 次）"
-            sleep $RETRY_DELAY
-          done
+          mkdir -p .huya_cookie
 
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "手动运行:强制使用 HUYA_COOKIE, 忽略缓存文件"
+            rm -f .huya_cookie/cookie.txt
+          fi
+
+          python main.py
           echo "✅ 虎粮发放完成"
+
+      - name: 保存登录态缓存
+        if: always() && hashFiles('.huya_cookie/cookie.txt') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .huya_cookie
+          key: huya-cookie-${{ github.run_id }}-${{ github.run_attempt }}
