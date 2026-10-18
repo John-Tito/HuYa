@@ -276,6 +276,7 @@ class HuyaAPI:
         self.passport = passport or _cookie_value(self.cookie, "username")
         self.timeout = timeout
         self.log = log
+        self.last_status = ""
         self._req_id = 0
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
@@ -309,8 +310,13 @@ class HuyaAPI:
         ), what=f"{servant}.{func}")
         resp.raise_for_status()
 
-        _, attrs = wup_decode(resp.content)
+        head, attrs = wup_decode(resp.content)
+        self.last_status = " ".join(
+            str(row.get("v", {}).get("value", "")) for row in (head.get(10) or [])
+        ).strip()
         bcode = _int_attr(attrs[""]) if "" in attrs else -1
+        if bcode != 0:
+            self.log(f"  [WUP] {servant}.{func} bcode={bcode} {self.last_status}")
         rsp = attrs.get("tRsp")
         return bcode, (_struct(rsp) if rsp else None)
 
@@ -441,19 +447,20 @@ class HuyaAPI:
         bcode, data = self.wup("wupui", "getFansSign",
                                self._with_user(lambda w: w.int64(1, lpid)))
         if bcode != 0 or not data:
-            return {"iCode": bcode, "sMsg": "wup 失败"}
+            return {"bcode": bcode, "sMsg": "wup 失败"}
         info = data.get(2) or {}
         return {"iCode": data.get(0, -1), "sMsg": data.get(1, ""),
                 "iPos": info.get(0), "lPosTime": info.get(1),
                 "lSignInFlag": info.get(2)}
 
     def fans_sign(self, lpid):
-        """打卡，iCode 为 0 才算成功"""
+        """打卡，bcode 是接口层，iCode 是业务层；iCode 为 0 才算成功"""
         bcode, data = self.wup("wupui", "setFansSign",
                                self._with_user(lambda w: w.int64(1, lpid)))
         if bcode != 0 or not data:
-            return {"ok": False, "iCode": bcode, "sMsg": "wup 失败"}
-        return {"ok": data.get(0) == 0, "iCode": data.get(0), "sMsg": data.get(1, "")}
+            return {"ok": False, "bcode": bcode, "iCode": bcode, "sMsg": "wup 失败"}
+        return {"ok": data.get(0) == 0, "bcode": 0,
+                "iCode": data.get(0), "sMsg": data.get(1, "")}
 
     # ---------------- 送礼 ----------------
 

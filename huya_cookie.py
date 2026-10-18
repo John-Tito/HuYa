@@ -23,6 +23,7 @@ udb_cred 本身也滚动成一张新的 180 天凭证。也就是说这是一个
 只要能把续期后的 Cookie 保存下来（写回 GitHub Secret），一张 Cookie 就可以无限用。
 """
 
+import sys
 import base64
 import hashlib
 import json
@@ -174,18 +175,34 @@ def refresh_cookie(cookie_str, log=print):
     return format_cookie(merged), info
 
 if __name__ == "__main__":
-    # 直接运行本文件 = 用 HUYA_COOKIE 做一次续期自检
-    raw = os.getenv(DEFAULT_COOKIE_ENV, "").strip()
+    # 直接运行本文件 = 用 cookie 做一次续期自检
+    # 用法: python huya_cookie.py [cookie_file]
+    #   若 cookie_file 存在则从其读取，否则回退到环境变量 HUYA_COOKIE
+    path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_COOKIE_FILE
+
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+    else:
+        raw = os.getenv(DEFAULT_COOKIE_ENV, "").strip()
+
     if not raw:
-        print("用法: {DEFAULT_COOKIE_ENV}='...' python huya_cookie.py")
+        print(f"用法: python {sys.argv[0]} [cookie_file]")
+        print(f"  或:  {DEFAULT_COOKIE_ENV}='...' python {sys.argv[0]}")
         raise SystemExit(1)
+
     new_cookie, info = refresh_cookie(raw)
     if info:
         parsed = parse_cookie(new_cookie)
         print("\n续期后的 Cookie：")
         print(new_cookie)
         print(f"\n(uid={info['uid']}, 共 {len(parsed)} 个字段)")
-        save_cookie_cache(DEFAULT_COOKIE_FILE,new_cookie)
+
+        # 保存为 {path_name}_refresh.txt
+        base, _ = os.path.splitext(path)
+        refresh_path = f"{base}_refresh.txt"
+        save_cookie_cache(refresh_path, new_cookie)
+        print(f"\n已保存到: {refresh_path}")
     else:
         print("续期失败")
         raise SystemExit(2)

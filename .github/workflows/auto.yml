@@ -38,7 +38,7 @@ jobs:
       - name: 安装 Python 包
         run: pip install -r requirements.txt
 
-      - name: 恢复登录态缓存(仅自动运行)
+      - name: PRE:恢复登录态缓存(仅自动运行)
         if: github.event_name == 'schedule'
         uses: actions/cache/restore@v4
         with:
@@ -47,24 +47,25 @@ jobs:
           restore-keys: |
             huya-cookie-
 
-      - name: 检查登录凭证
+      - name: PRE:检查登录态缓存
         env:
           HUYA_COOKIE: ${{ secrets.HUYA_COOKIE }}
+          HUYA_COOKIES: ${{ secrets.HUYA_COOKIES }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ -z "$HUYA_COOKIE" ]; then
-              echo "❌ 手动运行必须配置 HUYA_COOKIE"
+            if [ -z "$HUYA_COOKIE" ] && [ -z "$HUYA_COOKIES" ]; then
+              echo "❌ 手动运行必须配置 HUYA_COOKIE 或 HUYA_COOKIES"
               exit 1
             fi
           else
-            if [ -z "$HUYA_COOKIE" ] && [ ! -s .huya_cookie/cookie.txt ]; then
-              echo "❌ 自动运行:未配置 HUYA_COOKIE, 且缓存中没有可用登录态"
+            if [ -z "$HUYA_COOKIE" ] && [ -z "$HUYA_COOKIES" ] && ! ls .huya_cookie/*.txt >/dev/null 2>&1; then
+              echo "❌ 自动运行:未配置 Cookie, 且缓存中没有可用登录态"
               exit 1
             fi
           fi
 
-      - name: 获取房间号
+      - name: PRE:获取房间号
         id: get-rooms
         env:
           INPUT_ROOMS: ${{ github.event.inputs.rooms }}
@@ -84,13 +85,10 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: 随机延迟
-        if: github.event_name == 'schedule'
-        run: sleep $((RANDOM % 180 + 30))
-
       - name: 运行虎粮发放
         env:
           HUYA_COOKIE: ${{ secrets.HUYA_COOKIE }}
+          HUYA_COOKIES: ${{ secrets.HUYA_COOKIES }}
           HUYA_ROOMS: ${{ steps.get-rooms.outputs.rooms }}
           SEND_KEY: ${{ secrets.SEND_KEY }}
           EVENT_NAME: ${{ github.event_name }}
@@ -98,15 +96,25 @@ jobs:
           mkdir -p .huya_cookie
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "手动运行:强制使用 HUYA_COOKIE, 忽略缓存文件"
-            rm -f .huya_cookie/cookie.txt
+            echo "手动运行:强制使用 Secrets 里的 Cookie, 忽略缓存文件"
+            rm -f .huya_cookie/*.txt
           fi
 
           python main.py
           echo "✅ 虎粮发放完成"
 
-      - name: 保存登录态缓存
-        if: always() && hashFiles('.huya_cookie/cookie.txt') != ''
+      - name: POST:检查登录态缓存
+        id: check-cookie
+        if: always() # 即使前面失败也要检查
+        run: |
+          if find .huya_cookie -name "*.txt" -type f | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: POST:保存登录态缓存
+        if: always() && steps.check-cookie.outputs.exists == 'true'
         uses: actions/cache/save@v4
         with:
           path: .huya_cookie

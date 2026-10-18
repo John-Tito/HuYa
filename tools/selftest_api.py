@@ -12,6 +12,7 @@ Cookie 优先取环境变量 HUYA_COOKIE，其次 .huya_cookie/cookie1.txt / coo
 
 import argparse
 import datetime
+import glob
 import os
 import sys
 import warnings
@@ -28,9 +29,10 @@ def load_cookie(path):
     env = (os.getenv("HUYA_COOKIE") or "").strip()
     if env:
         return env, "env"
-    for p in (path, ".huya_cookie/cookie1.txt", ".huya_cookie/cookie.txt"):
-        if p and os.path.exists(p):
-            return open(p, encoding="utf-8").read().strip(), p
+    if path and os.path.exists(path):
+        return open(path, encoding="utf-8").read().strip(), path
+    for p in sorted(glob.glob(".huya_cookie/*.txt")):
+        return open(p, encoding="utf-8").read().strip(), p
     raise SystemExit("找不到 Cookie：请设置 HUYA_COOKIE 或准备 .huya_cookie/cookie1.txt")
 
 
