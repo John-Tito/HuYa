@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""虎牙接口客户端：虎粮查询、送礼、粉丝团打卡。
+"""虎牙 WUP 接口客户端：虎粮、送礼、打卡、粉丝盒。
 
-这些接口是虎牙自研的 WUP(JCE) 协议，用 HTTP POST 打到 cdnws.api.huya.com，
-不是常见的 REST。字段顺序和签名规则都照线上前端实现，改动前先跑一遍
-tools/selftest_api.py。
+网页接口走 cdnws.api.huya.com，粉丝盒走 wup.huya.com；改动后跑 tools/selftest_api.py。
 """
 
+import gzip
 import hashlib
 import re
 import struct
@@ -15,10 +14,16 @@ import time
 import requests
 
 WUP_URL = "https://cdnws.api.huya.com?baseinfo=default&timestamp=%d"
+APP_WUP_URL = "https://wup.huya.com"
 PROFILE_URL = "https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid=%s"
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 UA_WEB = "webh5&1.0.0&huya"
+APP_UA = "android&13.4.63&official&35"
+APP_HTTP_UA = ("Mozilla/5.0 (Linux; Android 14; 22011211C Build/UKQ1.230917.001; wv) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/118.0.0.0 "
+               "Mobile Safari/537.36/HuYa-android-12.7.4-6019-14-12007040")
+APP_DEVICE_MODEL = "22011211C"
 
 APPKEY = "AzCXiouW6aLc4AsVGKAOOLlNLawNQsuV"            # 支付流水号签名
 CONSUME_APPKEY = "Hi2UfWa8LhRM07ZjucWL9wzuX7okmGvd"    # 送礼签名
@@ -320,6 +325,37 @@ class HuyaAPI:
         rsp = attrs.get("tRsp")
         return bcode, (_struct(rsp) if rsp else None)
 
+    def app_wup(self, servant, func, fields_writer):
+        """移动端 WUP 调用（wup.huya.com + App UserId），并拆掉 tRsp 外层。"""
+        body = JceWriter()
+        fields_writer(body)
+        self._req_id += 1
+        pkt = wup_encode(servant, func, bytes(body.b), request_id=self._req_id)
+
+        resp = self._retry(lambda: self.session.post(
+            APP_WUP_URL, data=pkt, timeout=self.timeout,
+            headers={"Content-Type": "application/x-wup",
+                     "Cookie": self.cookie,
+                     "User-Agent": APP_HTTP_UA},
+        ), what=f"{servant}.{func}")
+        resp.raise_for_status()
+
+        raw = resp.content
+        if raw[:3] == b"\x1f\x8b\x08":
+            raw = gzip.decompress(raw)
+        head, attrs = wup_decode(raw)
+        self.last_status = " ".join(
+            str(row.get("v", {}).get("value", "")) for row in (head.get(10) or [])
+        ).strip()
+        bcode = _int_attr(attrs[""]) if "" in attrs else -1
+        if bcode != 0:
+            self.log(f"  [WUP] {servant}.{func} bcode={bcode} {self.last_status}")
+        rsp = attrs.get("tRsp")
+        data = _struct(rsp) if rsp else None
+        if isinstance(data, dict) and set(data.keys()) == {0} and isinstance(data[0], dict):
+            data = data[0]
+        return bcode, data
+
     def _with_user(self, extra):
         def write(w):
             w.struct(0, self._write_user)
@@ -334,6 +370,16 @@ class HuyaAPI:
         w.string(4, self.cookie)
         w.int32(5, 0)
         w.string(6, "")
+
+    def _write_app_user(self, w):
+        w.int64(0, self.uid)
+        w.string(1, "")
+        w.string(2, "")
+        w.string(3, APP_UA)
+        w.string(4, self.cookie)
+        w.int32(5, 2)
+        w.string(6, APP_DEVICE_MODEL)
+        w.string(7, "")
 
     def _get(self, url):
         headers = {"Referer": "https://www.huya.com/"}
@@ -391,10 +437,11 @@ class HuyaAPI:
 
     # ---------------- 背包 ----------------
 
-    def package(self):
-        """背包列表"""
+    def package(self, lpid=0):
+        """背包列表；lpid 为主播 uid，仅用于查询，不触发每日礼包。"""
+        lpid = int(lpid or 0)
         bcode, data = self.wup("wupui", "getPackageGift",
-                               self._with_user(lambda w: w.int64(1, 0)))
+                               self._with_user(lambda w: w.int64(1, lpid)))
         if bcode != 0 or not data:
             return bcode, []
 
@@ -411,9 +458,9 @@ class HuyaAPI:
             })
         return bcode, items
 
-    def hu_liang_count(self, name="虎粮"):
-        """返回 (数量, bcode, 背包列表)"""
-        bcode, items = self.package()
+    def hu_liang_count(self, name="虎粮", lpid=0):
+        """返回 (虎粮数, bcode, 背包列表)。"""
+        bcode, items = self.package(lpid)
         return sum(i["count"] for i in items if name in i["name"]), bcode, items
 
     def water(self, offset=0, last_order_id=""):
@@ -440,6 +487,48 @@ class HuyaAPI:
                 "time": w.get(4),
             })
         return bcode, rows
+
+    # ---------------- 粉丝盒 ----------------
+
+    def _fans_box_fields(self, lpid):
+        lpid = int(lpid)
+
+        def write(w):
+            w.struct(0, self._write_app_user)
+            w.int64(1, lpid)
+            # 线上字段是 tag 2 = 3；tag 3 = 2 查询能过、领取失败
+            w.int32(2, 3)
+
+        return write
+
+    def fans_box_state(self, lpid):
+        """粉丝盒状态：1 未达到 / 2 计时中 / 3 可领取 / 4 已领取。"""
+        bcode, data = self.app_wup("wupui", "queryFansGroupTaskInfo",
+                                   self._fans_box_fields(lpid))
+        if bcode != 0 or not data:
+            return {"bcode": bcode, "iCode": bcode, "state": -1, "sMsg": "wup 失败"}
+        day = data.get(7) or {}
+        return {
+            "bcode": 0,
+            "iCode": data.get(0),
+            "state": day.get(0, 0) if isinstance(day, dict) else 0,
+            "sMsg": data.get(1, ""),
+        }
+
+    def claim_fans_box(self, lpid):
+        """领取固定 10 粉丝盒。"""
+        bcode, data = self.app_wup("wupui", "operateFansBox",
+                                   self._fans_box_fields(lpid))
+        if bcode != 0 or not data:
+            return {"ok": False, "bcode": bcode, "iCode": bcode,
+                    "count": 0, "sMsg": "wup 失败"}
+        return {
+            "ok": data.get(0) in (0, None),
+            "bcode": 0,
+            "iCode": data.get(0),
+            "count": data.get(5, 0),
+            "sMsg": data.get(1, ""),
+        }
 
     # ---------------- 打卡 ----------------
 

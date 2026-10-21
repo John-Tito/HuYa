@@ -8,6 +8,7 @@
 - Cookie、房间号通过 GitHub Secrets 管理
 - 支持定时运行和手动触发
 - 支持一个或多个账号
+- 自动领取粉丝牌每日礼包和固定 10 粉丝盒
 - 自动读取背包虎粮, 按房间批量分配
 - 通过 GitHub Actions 计划运行
 - 可选 Server 酱推送赠送和打卡结果
@@ -86,6 +87,7 @@ python main.py
 | HUYA_ROOMS | 目标房间号列表, 必须 |
 | SEND_KEY | Server 酱 SendKey, 可选 |
 | HUYA_SEND_DRY_RUN | 设为 1 时只演练流程, 不真正赠送 |
+| HUYA_CLAIM_FANS_BOX | 设为 0 时关闭固定 10 粉丝盒领取, 默认开启 |
 
 ---
 

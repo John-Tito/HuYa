@@ -36,13 +36,16 @@ def parse_rooms(text):
 
 
 class HuYaAuto:
-    def __init__(self, account, rooms, dry_run=False):
+    def __init__(self, account, rooms, dry_run=False, claim_fans_box=True,
+                 visit_rooms=True):
         self.label = account["label"]
         self.tag = f"[{self.label}] " if self.label else ""
         self.cookie_seed = account["seed"]
         self.cookie_path = account["path"]
         self.rooms = rooms
         self.dry_run = dry_run
+        self.enable_fans_box = claim_fans_box
+        self.enable_room_visit = visit_rooms
         self.msg_logs = []
         self.passport = ""
         self.api = None
@@ -135,6 +138,70 @@ class HuYaAuto:
         print(f"{self.tag}[ERROR] 登录失败，Cookie 可能已失效")
         return False
 
+    def visit_rooms(self):
+        """打开各房间页，触发每日粉丝礼包。"""
+        if not self.enable_room_visit:
+            return
+        from room_visit import visit_rooms
+        visit_rooms(self.cookie, self.rooms, tag=self.tag, log=print)
+
+    def claim_fans_boxes(self):
+        """领取每个主播的固定 10 粉丝盒。"""
+        state_text = {1: "未达到", 2: "计时中", 3: "可领取", 4: "今日已领取"}
+        seen = set()
+        logs = []
+        for rid in self.rooms:
+            try:
+                lp, _ = self.api.room_lp_gid(rid)
+            except Exception as e:
+                print(f"{self.tag}[WARN] 房间 {rid} 获取主播 uid 失败: "
+                      f"{type(e).__name__}: {e}")
+                continue
+            if not lp or lp in seen:
+                continue
+            seen.add(lp)
+
+            try:
+                st = self.api.fans_box_state(int(lp))
+                if st.get("bcode", 0) != 0:
+                    msg = f"主播 {lp} 状态查询失败 bcode={st.get('bcode')}"
+                    print(f"{self.tag}[WARN] {msg}")
+                    logs.append(msg)
+                    continue
+
+                state = st.get("state")
+                if state == 4:
+                    msg = f"主播 {lp} 今日已领"
+                    print(f"{self.tag}[FANSBOX] {msg}")
+                    logs.append(msg)
+                    continue
+                if state != 3:
+                    msg = f"主播 {lp} 暂不可领({state_text.get(state, state)})"
+                    print(f"{self.tag}[FANSBOX] {msg}")
+                    logs.append(msg)
+                    continue
+
+                res = self.api.claim_fans_box(int(lp))
+                if res.get("ok"):
+                    msg = f"主播 {lp} 领取 +{res.get('count', 0)}"
+                    print(f"{self.tag}[FANSBOX] {msg}")
+                elif res.get("iCode") == 5:
+                    msg = f"主播 {lp} 领取被拒绝 iCode=5"
+                    print(f"{self.tag}[FANSBOX] {msg}")
+                else:
+                    msg = (f"主播 {lp} 领取失败 iCode={res.get('iCode')} "
+                           f"{res.get('sMsg') or ''}").strip()
+                    print(f"{self.tag}[WARN] {msg}")
+                logs.append(msg)
+            except Exception as e:
+                msg = f"主播 {lp} 粉丝盒异常: {type(e).__name__}: {e}"
+                print(f"{self.tag}[WARN] {msg}")
+                logs.append(msg)
+            _pause(0.5, 1.2)
+
+        if logs:
+            self.msg_logs.append("粉丝盒: " + "；".join(logs))
+
     def get_hl_count(self):
         """查询失败返回 None，不要当成 0（否则会误跳过送礼）"""
         print(f"{self.tag}[SEARCH] 正在查询虎粮数量...")
@@ -216,6 +283,9 @@ class HuYaAuto:
             self.msg_logs.append("登录失败")
             return
 
+        self.visit_rooms()
+        if self.enable_fans_box:
+            self.claim_fans_boxes()
         total = self.get_hl_count()
         if total is None:
             self.msg_logs.append("虎粮查询失败，本次只打卡")
@@ -267,11 +337,15 @@ def main():
 
     accounts = build_accounts()
     dry_run = os.getenv("HUYA_SEND_DRY_RUN", "").strip() == "1"
-    print(f"[INFO] 共 {len(accounts)} 个账号，房间 {rooms}")
+    claim_fans_box = os.getenv("HUYA_CLAIM_FANS_BOX", "1").strip() != "0"
+    visit_rooms = os.getenv("HUYA_VISIT_ROOMS", "1").strip() != "0"
+    print(f"[INFO] 共 {len(accounts)} 个账号，房间 {rooms}，"
+          f"粉丝盒{'开启' if claim_fans_box else '关闭'}，"
+          f"房间访问{'开启' if visit_rooms else '关闭'}")
 
     logs = []
     for account in accounts:
-        bot = HuYaAuto(account, rooms, dry_run)
+        bot = HuYaAuto(account, rooms, dry_run, claim_fans_box, visit_rooms)
         bot.run()
         label = account["label"]
         logs.extend(f"{label}: {m}" if label else m for m in bot.msg_logs)

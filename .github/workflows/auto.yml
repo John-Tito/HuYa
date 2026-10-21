@@ -38,6 +38,9 @@ jobs:
       - name: 安装 Python 包
         run: pip install -r requirements.txt
 
+      - name: 安装 Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
       - name: PRE:恢复登录态缓存(仅自动运行)
         if: github.event_name == 'schedule'
         uses: actions/cache/restore@v4

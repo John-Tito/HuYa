@@ -39,6 +39,9 @@ def load_cookie(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--room", type=int, default=998)
+    ap.add_argument("--fans-box", action="store_true", help="查询粉丝盒状态")
+    ap.add_argument("--claim-fans-box", action="store_true",
+                    help="领取粉丝盒（会改变账号状态）")
     ap.add_argument("--send-dry-run", action="store_true", help="只生成流水号与签名")
     ap.add_argument("--send", type=int, default=0, help="真的送 N 个虎粮（会扣粮！）")
     args = ap.parse_args()
@@ -78,6 +81,16 @@ def main():
     if not lp:
         return
     lpid = int(lp)
+
+    if args.fans_box or args.claim_fans_box:
+        state = api.fans_box_state(lpid)
+        print("粉丝盒状态:", state)
+        if args.claim_fans_box and state.get("state") == 3:
+            res = api.claim_fans_box(lpid)
+            print("粉丝盒领取:", res)
+            print("领取后状态:", api.fans_box_state(lpid),
+                  "背包:", api.hu_liang_count()[0])
+
     print("打卡状态:", api.fans_sign_state(lpid))
 
     if args.send_dry_run or args.send:
